@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/VictoriaMetrics/metrics"
+	"github.com/0magnet/metrics"
 )
 
 func ExampleSummary() {

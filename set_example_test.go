@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/VictoriaMetrics/metrics"
+	"github.com/0magnet/metrics"
 )
 
 func ExampleSet() {

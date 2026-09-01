@@ -1,4 +1,4 @@
-module github.com/VictoriaMetrics/metrics
+module github.com/0magnet/metrics
 
 go 1.24.0
 
