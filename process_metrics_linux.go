@@ -321,7 +321,11 @@ func psiTotalSecs(microsecs uint64) float64 {
 var psiMetricsStart = func() *psiMetrics {
 	m, err := getPSIMetrics()
 	if err != nil {
-		log.Printf("INFO: metrics: disable exposing PSI metrics because of failed init: %s", err)
+		// /proc/pressure is missing on kernels before 4.20 and in unprivileged
+		// containers, so only log this when asked to.
+		if os.Getenv("VICTORIA_METRICS_PSI_LOG") == "1" {
+			log.Printf("INFO: metrics: disable exposing PSI metrics because of failed init: %s", err)
+		}
 		return nil
 	}
 	return m
