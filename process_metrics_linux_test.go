@@ -1,6 +1,8 @@
 package metrics
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestGetMaxFilesLimit(t *testing.T) {
 	f := func(want uint64, path string, wantErr bool) {
@@ -50,46 +52,90 @@ func TestGetMemStats(t *testing.T) {
 	f(memStats{}, "testdata/status_bad", true)
 }
 
-func TestGetCgroupV2PathInternal(t *testing.T) {
-	f := func(want, cgroupData, mountinfoData string) {
+func TestGetCgroupPaths(t *testing.T) {
+	f := func(cgroupData, v2Mountpoint, wantV2Path, wantCPUStatPath string) {
 		t.Helper()
-		got := getCgroupV2PathInternal(cgroupData, mountinfoData)
+		v2Path, cpuStatPath := getCgroupPaths(cgroupData, v2Mountpoint)
+		if v2Path != wantV2Path {
+			t.Fatalf("unexpected v2 path: %q, want: %q", v2Path, wantV2Path)
+		}
+		if cpuStatPath != wantCPUStatPath {
+			t.Fatalf("unexpected cpu.stat path: %q, want: %q", cpuStatPath, wantCPUStatPath)
+		}
+	}
+
+	// Unified cgroup v2 mounted at /sys/fs/cgroup.
+	f("0::/user.slice/session-1.scope\n", "/sys/fs/cgroup",
+		"/sys/fs/cgroup/user.slice/session-1.scope", "/sys/fs/cgroup/user.slice/session-1.scope/cpu.stat")
+
+	// Trailing slash in the relative path must be trimmed.
+	f("0::/\n", "/sys/fs/cgroup", "/sys/fs/cgroup", "/sys/fs/cgroup/cpu.stat")
+
+	// Hybrid mode: PSI from cgroup v2 at /sys/fs/cgroup/unified, cpu.stat from cgroup v1.
+	// See https://github.com/VictoriaMetrics/metrics/issues/127
+	f("4:cpu,cpuacct:/app.service\n0::/app.service\n", "/sys/fs/cgroup/unified",
+		"/sys/fs/cgroup/unified/app.service", "/sys/fs/cgroup/cpu/app.service/cpu.stat")
+
+	// Legacy cgroup v1 only.
+	f("4:cpu,cpuacct:/app.service\n", "", "", "/sys/fs/cgroup/cpu/app.service/cpu.stat")
+
+	// cgroup v2 entry present, but cgroup v2 isn't mounted.
+	f("0::/user.slice\n", "", "", "")
+
+	// Unified mode without cgroup v2 entry.
+	f("1:name=systemd:/user.slice\n", "/sys/fs/cgroup", "", "")
+}
+
+func TestGetCgroupV1RelativePath(t *testing.T) {
+	f := func(want, cgroupData string) {
+		t.Helper()
+		got := getCgroupV1RelativePath(cgroupData)
 		if got != want {
 			t.Fatalf("unexpected result: %q, want: %q", got, want)
 		}
 	}
 
-	// Pure cgroup v2: unified hierarchy mounted at /sys/fs/cgroup.
-	f("/sys/fs/cgroup/user.slice/user-1000.slice/session-1.scope",
-		"0::/user.slice/user-1000.slice/session-1.scope\n",
-		"30 23 0:26 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup2 rw,nsdelegate\n")
+	// cgroup v1 cpu controller.
+	f("/daemons", "5:cpuacct,cpu,cpuset:/daemons\n")
+	f("/", "5:cpuacct,cpu,cpuset:/\n")
 
-	// Hybrid cgroup mode: cgroup v2 mounted at /sys/fs/cgroup/unified.
-	// See https://github.com/VictoriaMetrics/metrics/issues/127
-	f("/sys/fs/cgroup/unified/user.slice/user-2390.slice/session-c625.scope",
-		"1:name=systemd:/user.slice/user-2390.slice/session-c625.scope\n"+
-			"0::/user.slice/user-2390.slice/session-c625.scope\n",
-		"30 23 0:26 / /sys/fs/cgroup tmpfs rw - tmpfs tmpfs rw\n"+
-			"31 30 0:27 / /sys/fs/cgroup/unified rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup2 rw,nsdelegate\n"+
-			"32 30 0:28 / /sys/fs/cgroup/cpu,cpuacct rw - cgroup cgroup rw,cpu,cpuacct\n")
+	// Hybrid mode: both cgroup v1 cpu controller and cgroup v2 entries.
+	f("/system.slice/app.service",
+		"4:cpu,cpuacct:/system.slice/app.service\n"+
+			"0::/system.slice/app.service\n")
 
-	// Mountpoint with optional fields before the " - " separator.
-	f("/sys/fs/cgroup/foo",
-		"0::/foo\n",
-		"30 23 0:26 / /sys/fs/cgroup rw shared:5 - cgroup2 cgroup2 rw\n")
+	// No cpu controller in cgroup v1.
+	f("", "5:memory:/daemons\n")
 
-	// Trailing slash in the relative path must be trimmed.
-	f("/sys/fs/cgroup",
-		"0::/\n",
-		"30 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n")
+	// Pure cgroup v2.
+	f("", "0::/user.slice\n")
+}
 
-	// No cgroup v2 entry (cgroup v1 only) -> empty path.
-	f("",
-		"1:name=systemd:/user.slice\n",
-		"30 23 0:26 / /sys/fs/cgroup/systemd rw - cgroup cgroup rw,name=systemd\n")
+func TestParseCgroupCPUStat(t *testing.T) {
+	f := func(data string, want uint64) {
+		t.Helper()
+		ccs, err := parseCgroupCPUStat(data)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ccs.throttledNanosecs != want {
+			t.Fatalf("unexpected throttledNanosecs: %d, want: %d", ccs.throttledNanosecs, want)
+		}
+	}
 
-	// cgroup v2 present in /proc/self/cgroup but not mounted -> fallback to /sys path.
-	f("/sys/fs/cgroup/user.slice",
-		"0::/user.slice\n",
-		"30 23 0:26 / /sys/fs/cgroup rw - cgroup cgroup rw,cpu\n")
+	// cgroup v2
+	f("usage_usec 123\nuser_usec 45\nsystem_usec 67\nnr_periods 7\nnr_throttled 3\nthrottled_usec 1000000\n", 1e9)
+
+	// cgroup v1
+	f("nr_periods 9\nnr_throttled 4\nthrottled_time 2000000000\n", 2e9)
+
+	// without throttling field
+	f("usage_usec 123\nuser_usec 45\nsystem_usec 67\n", 0)
+
+	t.Run("bad-value", func(t *testing.T) {
+		_, err := parseCgroupCPUStat("throttled_usec nope\n")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	})
 }
